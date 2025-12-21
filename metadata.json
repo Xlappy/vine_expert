@@ -1,0 +1,5 @@
+{
+  "name": "VinExpert - Local Expert Sommelier",
+  "description": "Програмна експертна система підбору вина з миттєвим алгоритмом ранжування та керуванням базою знань.",
+  "requestFramePermissions": []
+}
