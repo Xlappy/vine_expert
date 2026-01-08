@@ -1,8 +1,7 @@
-
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { Wine, UserPreferences, Recommendation, AppView } from './types';
-import { INITIAL_WINES } from './constants';
-import { SommelierService } from './services/sommelierService';
+import { SommelierService } from './services/geminiService';
+import { api } from './services/api';
 import WineTable from './components/WineTable';
 import PreferenceManager from './components/PreferenceManager';
 import WineModal from './components/WineModal';
@@ -14,10 +13,7 @@ type DatabaseSubView = 'red_ua' | 'red_ex' | 'white_ua' | 'white_ex' | 'other';
 const App: React.FC = () => {
   const [view, setView] = useState<AppView>('sommelier');
   const [dbSubView, setDbSubView] = useState<DatabaseSubView>('red_ua');
-  const [wines, setWines] = useState<Wine[]>(() => {
-    const saved = localStorage.getItem('vinexpert_db');
-    return saved ? JSON.parse(saved) : INITIAL_WINES;
-  });
+  const [wines, setWines] = useState<Wine[]>([]);
   const [preferences, setPreferences] = useState<UserPreferences>({
     likedStyles: ['Red'],
     dislikedGrapes: [],
@@ -29,78 +25,156 @@ const App: React.FC = () => {
     minAging: 0,
     preferredBody: 3,
   });
-  
+
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [hasAnalyzed, setHasAnalyzed] = useState(false);
-  const [replacingId, setReplacingId] = useState<string | null>(null);
-  const [selectedWineId, setSelectedWineId] = useState<string | null>(null);
+  const [replacingId, setReplacingId] = useState<string | number | null>(null);
+  const [selectedWineId, setSelectedWineId] = useState<string | number | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+
+  // Favorites handled locally for now or API? User didn't specify favorites API. 
+  // We keep local storage for favorites but use number/string IDs
   const [favorites, setFavorites] = useState<string[]>(() => {
     const saved = localStorage.getItem('vinexpert_favorites');
     return saved ? JSON.parse(saved) : [];
   });
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Load wines from API
+  useEffect(() => {
+    const loadWines = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await api.fetchWines();
+        setWines(data);
+      } catch (err) {
+        console.error(err);
+        setError('Не вдалося завантажити базу вин. Перевірте з’єднання з сервером.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadWines();
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('vinexpert_favorites', JSON.stringify(favorites));
   }, [favorites]);
 
-  useEffect(() => {
-    localStorage.setItem('vinexpert_db', JSON.stringify(wines));
-  }, [wines]);
-
   const sommelier = useMemo(() => new SommelierService(), []);
 
-  const fetchRecommendations = useCallback(() => {
+  const fetchRecommendations = useCallback(async () => {
     setLoading(true);
     if (!hasAnalyzed) {
-      setTimeout(() => setHasAnalyzed(true), 200);
+      setHasAnalyzed(true);
     }
-    
-    setTimeout(() => {
-      const recs = sommelier.getRecommendations(wines, preferences);
-      setRecommendations(recs.slice(0, 3));
+
+    try {
+      const recs = await sommelier.getRecommendations(wines, preferences);
+      setRecommendations(recs);
+    } catch (err) {
+      console.error(err);
+      setError('Помилка при отриманні рекомендацій.');
+    } finally {
       setLoading(false);
-    }, 1000);
+    }
   }, [wines, preferences, sommelier, hasAnalyzed]);
 
-  const toggleFavorite = (id: string) => {
-    setFavorites(prev => 
-      prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id]
+  const toggleFavorite = (id: string | number) => {
+    const idStr = String(id);
+    setFavorites(prev =>
+      prev.includes(idStr) ? prev.filter(f => f !== idStr) : [...prev, idStr]
     );
   };
 
-  const addWine = (newWine: Wine) => {
-    setWines(prev => [newWine, ...prev]);
-    setIsAddModalOpen(false);
+  const addWine = async (newWine: Wine) => {
+    try {
+      // Create copy without ID (DB handles it)
+      const { id, ...wineData } = newWine;
+      const created = await api.createWine(wineData);
+      setWines(prev => [created, ...prev]);
+      setIsAddModalOpen(false);
+    } catch (err) {
+      console.error("Failed to add wine", err);
+      alert('Помилка при додаванні вина');
+    }
   };
 
-  const autoReplace = (oldId: string) => {
-    const currentIds = recommendations.map(r => r.wineId);
-    const alternativesRecs = sommelier.getRecommendations(wines, preferences, currentIds);
-    if (alternativesRecs.length > 0) {
-      setRecommendations(prev => prev.map(r => r.wineId === oldId ? alternativesRecs[0] : r));
+  const autoReplace = async (oldId: string | number) => {
+    const currentIds = recommendations.map(r => String(r.wineId));
+    // Gemini service requires string IDs for exclusion logic usually, need to check
+    // Actually getRecommendations definition: feedback?: { rejectedId: string, reason: str }
+    // We are just asking for new recs. 
+    // The previous logic was specialized in `sommelierService.ts`. 
+    // In Gemini, we might need to re-prompt or just filter locally if we want simple replace.
+    // For now, let's just ask Gemini again excluding the old one?
+    // Implementation:
+    const oldIdStr = String(oldId);
+
+    setLoading(true);
+    try {
+      // We emulate "replace" by asking for new recommendations with a reject reason
+      // Or simpler: filter out the old one from candidates passed to AI?
+      // `sommelier.getRecommendations` takes `wines`. We can filter `wines` passed to it.
+      const filteredWines = wines.filter(w => String(w.id) !== oldIdStr);
+      const recs = await sommelier.getRecommendations(filteredWines, preferences, { rejectedId: oldIdStr, reason: "User requested replacement" });
+
+      // Update only the replaced one? Or replace all?
+      // The user wants to replace ONE card.
+      // We can take the first new recommendation that isn't in current list.
+      const newRec = recs.find(r => !currentIds.includes(String(r.wineId)));
+      if (newRec) {
+        setRecommendations(prev => prev.map(r => String(r.wineId) === oldIdStr ? newRec : r));
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+      setReplacingId(null);
     }
+  };
+
+  const manualReplace = async (oldId: string | number, newWineId: string | number) => {
+    // For manual replace, we just swap it. 
+    // But we need the "explanation" which we don't have for the new wine.
+    // We could ask AI for explanation for this specific wine?
+    // Or just swap with generic text.
+    // Ideally, we ask AI to explain why THIS specific wine fits.
+
+    // Simplification for now: Just swap and keep old explanation or "Manual Selection".
+    // Or call AI for single explanation?
+    // The previous app logic: `newRec` was found in `allCandidates`.
+
+    const wine = wines.find(w => w.id === newWineId);
+    if (!wine) return;
+
+    setRecommendations(prev => prev.map(r => String(r.wineId) === String(oldId) ? {
+      wineId: newWineId,
+      explanation: `Вино ${wine.name} було обрано вами вручну.`,
+      score: 100
+    } : r));
     setReplacingId(null);
   };
 
-  const manualReplace = (oldId: string, newWineId: string) => {
-    const currentIds = recommendations.map(r => r.wineId);
-    const allCandidates = sommelier.getRecommendations(wines, preferences, currentIds.filter(id => id !== oldId));
-    const newRec = allCandidates.find(r => r.wineId === newWineId);
-    if (newRec) {
-      setRecommendations(prev => prev.map(r => r.wineId === oldId ? newRec : r));
+  const updateWineList = async (updatedWines: Wine[]) => {
+    // Assuming single update for now as Table sends list but usually edits one
+    // But `WineTable` sends `[editForm]` which is array of 1.
+    for (const w of updatedWines) {
+      try {
+        await api.updateWine(w.id, w);
+        setWines(prev => prev.map(existing => existing.id === w.id ? w : existing));
+      } catch (e) {
+        console.error("Update failed", e);
+        alert("Не вдалося оновити вино");
+      }
     }
-    setReplacingId(null);
   };
 
-  const updateWineList = (updatedWines: Wine[]) => {
-    setWines(prev => {
-      const updatedMap = new Map(prev.map(w => [w.id, w]));
-      updatedWines.forEach(w => updatedMap.set(w.id, w));
-      return Array.from(updatedMap.values());
-    });
-  };
+  // Handlers for deleting wines? WineTable has no delete button in provided code. 
+  // It only has Edit.
+  // If we need delete, we can add it. Use API `deleteWine`.
 
   const filteredDatabase = useMemo(() => {
     switch (dbSubView) {
@@ -114,17 +188,21 @@ const App: React.FC = () => {
   }, [wines, dbSubView]);
 
   const favoriteWines = useMemo(() => {
-    return wines.filter(w => favorites.includes(w.id));
+    return wines.filter(w => favorites.includes(String(w.id)));
   }, [wines, favorites]);
 
   const alternatives = useMemo(() => {
     if (!replacingId) return [];
-    const currentIds = recommendations.map(r => r.wineId);
-    return sommelier.getRecommendations(wines, preferences, currentIds);
-  }, [replacingId, wines, preferences, recommendations, sommelier]);
+    // Only show wines not currently recommended
+    const currentIds = recommendations.map(r => String(r.wineId));
+    return wines.filter(w => !currentIds.includes(String(w.id)));
+    // Previous logic called sommelier to get ranked alternatives.
+    // For now, return all available wines as alternatives for manual selection.
+    // Or we could limit?
+  }, [replacingId, wines, recommendations]);
 
   const getWineIcon = (type: string) => {
-    switch(type) {
+    switch (type) {
       case 'Red': return '🍷';
       case 'White': return '🥂';
       case 'Sparkling': return '🍾';
@@ -135,6 +213,19 @@ const App: React.FC = () => {
 
   const selectedWine = useMemo(() => wines.find(w => w.id === selectedWineId), [wines, selectedWineId]);
   const replacingWine = useMemo(() => wines.find(w => w.id === replacingId), [wines, replacingId]);
+
+  if (error && wines.length === 0) {
+    // Full screen error if no data
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#fcf9f7] font-['Montserrat']">
+        <div className="text-center p-10">
+          <h1 className="text-3xl font-black text-stone-900 mb-4">ПОМИЛКА СЕРВЕРА</h1>
+          <p className="text-stone-600 mb-6">{error}</p>
+          <button onClick={() => window.location.reload()} className="bg-stone-900 text-white px-6 py-3 rounded-xl font-bold uppercase hover:bg-black transition-all">Спробувати ще раз</button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen selection:bg-rose-100 pb-20 font-['Montserrat'] bg-[#fcf9f7]">
@@ -159,11 +250,10 @@ const App: React.FC = () => {
               <button
                 key={btn.id}
                 onClick={() => setView(btn.id as AppView)}
-                className={`px-5 py-2 rounded-md text-[11px] font-bold uppercase tracking-wide transition-all ${
-                  view === btn.id 
-                    ? 'bg-white text-stone-900 shadow-sm' 
-                    : 'text-stone-500 hover:text-stone-800'
-                }`}
+                className={`px-5 py-2 rounded-md text-[11px] font-bold uppercase tracking-wide transition-all ${view === btn.id
+                  ? 'bg-white text-stone-900 shadow-sm'
+                  : 'text-stone-500 hover:text-stone-800'
+                  }`}
               >
                 {btn.label}
               </button>
@@ -181,14 +271,14 @@ const App: React.FC = () => {
                 {favoriteWines.map(wine => (
                   <div key={wine.id} onClick={() => setSelectedWineId(wine.id)} className="bg-white p-8 rounded-[2rem] border border-stone-100 shadow-sm hover:shadow-xl transition-all cursor-pointer group">
                     <div className="flex justify-between items-start mb-6">
-                       <span className="text-5xl">{getWineIcon(wine.type)}</span>
-                       <button onClick={(e) => { e.stopPropagation(); toggleFavorite(wine.id); }} className="text-xl">❤️</button>
+                      <span className="text-5xl">{getWineIcon(wine.type)}</span>
+                      <button onClick={(e) => { e.stopPropagation(); toggleFavorite(wine.id); }} className="text-xl">❤️</button>
                     </div>
                     <h3 className="font-black text-xl text-stone-900 mb-1 leading-tight">{wine.name}</h3>
                     <p className="text-[10px] font-bold text-stone-400 uppercase tracking-widest">{wine.region} • {wine.year}</p>
                     <div className="mt-6 pt-4 border-t border-stone-50 flex justify-between items-center">
-                       <span className="text-stone-900 font-black text-lg">{wine.price} ₴</span>
-                       <span className="text-[10px] font-black text-rose-900 uppercase">Досьє →</span>
+                      <span className="text-stone-900 font-black text-lg">{wine.price} ₴</span>
+                      <span className="text-[10px] font-black text-rose-900 uppercase">Досьє →</span>
                     </div>
                   </div>
                 ))}
@@ -214,31 +304,35 @@ const App: React.FC = () => {
                 ))}
               </div>
             </div>
-            <WineTable wines={filteredDatabase} onUpdate={updateWineList} title="Активні записи" />
+            {/* Show loading state for db view if reloading? */}
+            {loading && wines.length === 0 ? (
+              <div className="text-center py-10">Завантаження...</div>
+            ) : (
+              <WineTable wines={filteredDatabase} onUpdate={updateWineList} title="Активні записи" />
+            )}
           </div>
         )}
 
         {view === 'sommelier' && (
           <div className="relative">
             <div className={`flex flex-col lg:flex-row gap-8 transition-all duration-700 ${hasAnalyzed ? 'items-start' : 'items-center justify-center pt-12 md:pt-20'}`}>
-              
+
               <div className={`transition-all duration-700 ${hasAnalyzed ? 'lg:w-[320px] w-full shrink-0 sticky top-24' : 'max-w-2xl w-full text-center'}`}>
                 {!hasAnalyzed && (
                   <div className="mb-10 animate-fadeIn">
-                    <h2 className="text-4xl md:text-5xl font-black text-stone-900 tracking-tighter mb-4 leading-tight uppercase">ВИННИЙ <br/><span className="text-stone-400">АНАЛІЗ</span></h2>
+                    <h2 className="text-4xl md:text-5xl font-black text-stone-900 tracking-tighter mb-4 leading-tight uppercase">ВИННИЙ <br /><span className="text-stone-400">АНАЛІЗ</span></h2>
                     <p className="text-stone-500 text-base font-medium max-w-md mx-auto leading-relaxed">Система VinExpert підбере ідеальну колекцію на основі ваших смакових преференцій.</p>
                   </div>
                 )}
-                
+
                 <PreferenceManager preferences={preferences} onChange={setPreferences} compact={!hasAnalyzed} />
-                
+
                 <div className={`mt-8 ${!hasAnalyzed ? 'flex justify-center' : ''}`}>
-                  <button 
+                  <button
                     onClick={fetchRecommendations}
                     disabled={loading}
-                    className={`bg-stone-900 text-white font-black transition-all shadow-xl active:scale-95 flex items-center justify-center gap-3 ${
-                      hasAnalyzed ? 'w-full py-4 rounded-2xl text-xs' : 'px-16 py-6 rounded-[2.5rem] text-lg'
-                    } ${loading ? 'opacity-50 cursor-wait' : 'hover:bg-black'}`}
+                    className={`bg-stone-900 text-white font-black transition-all shadow-xl active:scale-95 flex items-center justify-center gap-3 ${hasAnalyzed ? 'w-full py-4 rounded-2xl text-xs' : 'px-16 py-6 rounded-[2.5rem] text-lg'
+                      } ${loading ? 'opacity-50 cursor-wait' : 'hover:bg-black'}`}
                   >
                     {loading ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin"></div> : null}
                     <span className="uppercase tracking-widest">{hasAnalyzed ? 'Оновити Аналіз' : 'Запустити Аналіз'}</span>
@@ -252,11 +346,11 @@ const App: React.FC = () => {
                   <h3 className="text-lg font-black text-stone-900 uppercase tracking-tight">РЕЗУЛЬТАТИ ПІДБОРУ</h3>
                   <span className="text-[9px] font-bold text-stone-400 uppercase border border-stone-200 px-3 py-1 rounded-full">Optimal Match Ready</span>
                 </div>
-                
+
                 {recommendations.length > 0 ? (
                   <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
                     {recommendations.map((rec) => {
-                      const wine = wines.find(w => w.id === rec.wineId);
+                      const wine = wines.find(w => String(w.id) === String(rec.wineId));
                       if (!wine) return null;
 
                       return (
@@ -266,7 +360,7 @@ const App: React.FC = () => {
                               <span className="text-4xl">{getWineIcon(wine.type)}</span>
                               <div className="text-right">
                                 <div className="text-lg font-black text-stone-900">{wine.price} ₴</div>
-                                <div className="text-[8px] font-bold text-rose-900 uppercase tracking-wider">MATCH: {rec.score}%</div>
+                                <div className="text-[8px] font-bold text-rose-900 uppercase tracking-wider">MATCH: {rec.score || 95}%</div>
                               </div>
                             </div>
                             <h3 className="font-black text-xl text-stone-900 mb-1 leading-tight uppercase line-clamp-2 min-h-[3rem]">{wine.name}</h3>
@@ -281,16 +375,16 @@ const App: React.FC = () => {
 
                           <div className="p-8 pt-5 flex-grow flex flex-col">
                             <div className="bg-stone-50/50 p-5 rounded-2xl border border-stone-100 mb-6 flex-grow">
-                               <p className="text-[13px] text-stone-600 leading-relaxed font-medium italic line-clamp-4">
+                              <p className="text-[13px] text-stone-600 leading-relaxed font-medium italic line-clamp-4">
                                 "{rec.explanation}"
                               </p>
                             </div>
-                            
+
                             <div className="grid grid-cols-2 gap-4 mb-6">
                               <div className="flex flex-col">
                                 <span className="text-[8px] font-bold text-stone-300 uppercase tracking-widest mb-1.5">Щільність</span>
                                 <div className="flex gap-1">
-                                  {[1,2,3,4,5].map(b => <div key={b} className={`h-1 flex-1 rounded-full ${wine.body >= b ? 'bg-stone-900' : 'bg-stone-100'}`}></div>)}
+                                  {[1, 2, 3, 4, 5].map(b => <div key={b} className={`h-1 flex-1 rounded-full ${wine.body >= b ? 'bg-stone-900' : 'bg-stone-100'}`}></div>)}
                                 </div>
                               </div>
                               <div className="flex flex-col">
@@ -300,13 +394,13 @@ const App: React.FC = () => {
                             </div>
 
                             <div className="flex gap-3 mt-auto pt-4 border-t border-stone-50">
-                              <button 
+                              <button
                                 onClick={() => setSelectedWineId(wine.id)}
                                 className="flex-1 bg-stone-900 text-white py-3 rounded-xl font-black text-[10px] uppercase tracking-wider hover:bg-black transition-all active:scale-95"
                               >
                                 Докладно
                               </button>
-                              <button 
+                              <button
                                 onClick={() => setReplacingId(wine.id)}
                                 className="flex-1 bg-white text-stone-900 border border-stone-200 py-3 rounded-xl font-black text-[10px] uppercase tracking-wider hover:bg-stone-50 transition-all active:scale-95"
                               >
@@ -319,10 +413,12 @@ const App: React.FC = () => {
                     })}
                   </div>
                 ) : (
-                   <div className="flex flex-col items-center justify-center py-40 border-2 border-dashed border-stone-200 rounded-[3rem] px-10 text-center bg-white/40">
+                  <div className="flex flex-col items-center justify-center py-40 border-2 border-dashed border-stone-200 rounded-[3rem] px-10 text-center bg-white/40">
                     <span className="text-6xl mb-6 opacity-10">🔍</span>
-                    <h3 className="text-xl font-black text-stone-900 mb-2 tracking-tight uppercase">Нічого не знайдено</h3>
-                    <p className="text-stone-500 text-sm max-w-xs font-medium leading-relaxed">Спробуйте змінити фільтри або розширити ціновий діапазон.</p>
+                    <h3 className="text-xl font-black text-stone-900 mb-2 tracking-tight uppercase">
+                      {loading ? 'Аналізуємо вподобання...' : 'Нічого не знайдено'}
+                    </h3>
+                    {!loading && <p className="text-stone-500 text-sm max-w-xs font-medium leading-relaxed">Спробуйте змінити фільтри або розширити ціновий діапазон.</p>}
                   </div>
                 )}
               </div>
@@ -335,17 +431,19 @@ const App: React.FC = () => {
         <div className="max-w-7xl mx-auto flex justify-between items-center text-[9px] font-bold text-stone-400 uppercase tracking-widest">
           <div className="flex items-center gap-6">
             <span className="flex items-center gap-2"><span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span> SYSTEM ACTIVE</span>
-            <span className="opacity-30 hidden sm:inline">DB v1.5.0</span>
+            <span className={`opacity-30 hidden sm:inline ${error ? 'text-red-500 opacity-100' : ''}`}>
+              {error ? `ERROR: ${error}` : 'DB v2.0 CONNECTED'}
+            </span>
           </div>
           <div className="flex items-center gap-2 italic lowercase font-medium">
-             vinexpert pro <span className="text-[8px] not-italic uppercase font-black text-stone-900">sommelier edition</span>
+            vinexpert pro <span className="text-[8px] not-italic uppercase font-black text-stone-900">sommelier edition</span>
           </div>
         </div>
       </footer>
 
       {/* Modals */}
       {selectedWine && (
-        <WineModal wine={selectedWine} isOpen={!!selectedWineId} onClose={() => setSelectedWineId(null)} isFavorite={favorites.includes(selectedWine.id)} onToggleFavorite={toggleFavorite} />
+        <WineModal wine={selectedWine} isOpen={!!selectedWineId} onClose={() => setSelectedWineId(null)} isFavorite={favorites.includes(String(selectedWine.id))} onToggleFavorite={() => toggleFavorite(selectedWine.id)} />
       )}
       {replacingWine && (
         <ReplacementModal isOpen={!!replacingId} onClose={() => setReplacingId(null)} originalWine={replacingWine} alternatives={alternatives} allWines={wines} onSelect={(newId) => manualReplace(replacingId!, newId)} onAutoSelect={() => autoReplace(replacingId!)} />

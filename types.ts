@@ -1,6 +1,6 @@
 
 export interface Wine {
-  id: string;
+  id: string | number;
   name: string;
   type: 'Red' | 'White' | 'Rosé' | 'Sparkling' | 'Dessert';
   origin: 'Ukrainian' | 'Export';
