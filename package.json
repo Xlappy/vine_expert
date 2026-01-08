@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "concurrently \"npm run server\" \"vite\"",
     "server": "cd backend && npm start",
+    "seed": "cd backend && npm run seed",
+    "install-all": "npm install && cd backend && npm install",
+    "postinstall": "cd backend && npm install",
     "build": "vite build",
     "preview": "vite preview"
   },
