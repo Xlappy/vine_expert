@@ -11,7 +11,7 @@ interface NavigationProps {
 }
 
 const navItems = [
-    { id: 'sommelier', icon: Sparkles, label: 'Sommelier' },
+    { id: 'sommelier', icon: Sparkles, label: 'Expert' },
     { id: 'database', icon: Wine, label: 'Collection' },
     { id: 'favorites', icon: Heart, label: 'Favorites' },
 ];

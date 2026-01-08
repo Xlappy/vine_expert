@@ -1,0 +1,13 @@
+backend/
+index.html
+metadata.json
+node_modules/
+output.txt
+package.json
+package-lock.json
+postcss.config.cjs
+README.md
+src/
+tailwind.config.js
+tsconfig.json
+vite.config.ts
