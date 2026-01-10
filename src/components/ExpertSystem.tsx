@@ -138,6 +138,34 @@ const ExpertSystem: React.FC<ExpertSystemProps> = ({ wines, onWineClick, favorit
                             />
                         </div>
 
+                        {/* Price Filter */}
+                        <div className="space-y-6">
+                            <div className="space-y-2">
+                                <div className="flex justify-between items-center">
+                                    <span className="block text-[10px] uppercase font-bold tracking-widest text-subtle">Min Price</span>
+                                    <span className="text-[10px] font-bold text-gold">{preferences.priceRange[0]} ₴</span>
+                                </div>
+                                <input
+                                    type="range" min="0" max="5000" step="50"
+                                    value={preferences.priceRange[0]}
+                                    onChange={(e) => setPreferences(prev => ({ ...prev, priceRange: [Math.min(parseInt(e.target.value), prev.priceRange[1]), prev.priceRange[1]] }))}
+                                    className="w-full accent-gold h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer"
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <div className="flex justify-between items-center">
+                                    <span className="block text-[10px] uppercase font-bold tracking-widest text-subtle">Max Price</span>
+                                    <span className="text-[10px] font-bold text-gold">{preferences.priceRange[1]} ₴</span>
+                                </div>
+                                <input
+                                    type="range" min="0" max="10000" step="100"
+                                    value={preferences.priceRange[1]}
+                                    onChange={(e) => setPreferences(prev => ({ ...prev, priceRange: [prev.priceRange[0], Math.max(parseInt(e.target.value), prev.priceRange[0])] }))}
+                                    className="w-full accent-gold h-1.5 bg-white/10 rounded-full appearance-none cursor-pointer"
+                                />
+                            </div>
+                        </div>
+
                         {/* Aroma Notes (Like/Dislike) */}
                         <div>
                             <div className="flex justify-between items-center mb-4">

@@ -15,7 +15,7 @@ export class SommelierService {
             if (excludedIds.includes(String(wine.id))) return false;
 
             // Strict filters
-            if (wine.price > preferences.priceRange[1]) return false;
+            if (wine.price < preferences.priceRange[0] || wine.price > preferences.priceRange[1]) return false;
             if (preferences.likedStyles.length > 0 && !preferences.likedStyles.includes(wine.type)) return false;
 
             // Year filter (if provided)
